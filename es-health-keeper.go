@@ -377,7 +377,13 @@ func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster,
 	for _, hostCommandsResult := range hostsCommandsResult {
 		for _, commandResult := range hostCommandsResult.commandResults {
 			r := regexp.MustCompile(`ActiveEnterTimestamp=([ a-zA-Z0-9:-]+)`)
-			timestamp, err := time.Parse(systemdDateLayout, r.FindStringSubmatch(commandResult.stdout)[1])
+
+			findStrResult := r.FindStringSubmatch(commandResult.stdout)
+			if len(findStrResult) < 2 {
+				return false, fmt.Errorf("Cannot find timestamp string in command output")
+			}
+
+			timestamp, err := time.Parse(systemdDateLayout, findStrResult[1])
 			if err != nil {
 				return false, err
 			}
@@ -687,7 +693,7 @@ func main() {
         go workerRestarter(w, jobs, config, *sshUser, *sshPort)
     }
 
-    for clusterName, _ := range config.ElasticsearchClusters {
+    for clusterName := range config.ElasticsearchClusters {
         go workerSettingsChanger(clusterName, config)
     }
 
