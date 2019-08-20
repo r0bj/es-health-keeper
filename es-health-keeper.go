@@ -39,7 +39,7 @@ var (
 	prometheusQuery = kingpin.Flag("query", "prometheus query").Default("avg_over_time(up{job=\"elasticsearch\"}[20m])").String()
 	prometheusQueryResultThreshold = kingpin.Flag("query-result-threshold", "prometheus query result threshold").Default("0.05").Float()
 	prometheusQueryTimeout = kingpin.Flag("prometheus-query-timeout", "prometheus query timeout").Default("10").Int()
-	ESQueryTimeout = kingpin.Flag("es-query-timeout", "prometheus query timeout").Default("60").Int()
+	eSQueryTimeout = kingpin.Flag("es-query-timeout", "prometheus query timeout").Default("60").Int()
 	prometheusBasicAuthUser = kingpin.Flag("auth-user", "prometheus basic auth user").String()
 	prometheusBasicAuthPassword = kingpin.Flag("auth-password", "prometheus basic auth password").String()
 	configFile = kingpin.Flag("config-file", "path to config file").Default("/etc/es-health-keeper.yaml").String()
@@ -53,6 +53,7 @@ var (
 	slackIconEmoji = kingpin.Flag("slack-icon-emoji", "slack icon-emoji field").Default(":es-health-keeper:").String()
 )
 
+// PrometheusResult : containts prometheus result data
 type PrometheusResult struct {
 	Status string `json:"status"`
 	Data struct {
@@ -61,6 +62,7 @@ type PrometheusResult struct {
 	} `json:"data"`
 }
 
+// MetricSerie : containts prometheus metric serie data
 type MetricSerie struct {
 	Metric struct {
 		Instance string `json:"instance"`
@@ -69,11 +71,13 @@ type MetricSerie struct {
 	Value []interface{} `json:"value"`
 }
 
+// HTTPResponse : containts HTTP response data
 type HTTPResponse struct {
 	body string
 	err error
 }
 
+// CommandResult : containts command result data
 type CommandResult struct {
 	host string
 	service string
@@ -81,6 +85,7 @@ type CommandResult struct {
 	err error
 }
 
+// HostCommandsResult : containts host commands result data
 type HostCommandsResult struct {
 	combinedErr error
 	commandResults []CommandResult
@@ -94,20 +99,24 @@ type HostCommandsResult struct {
 // 	} `yaml:"elasticsearch_clusters"`
 // }
 
+// Config : containts config file data
 type Config struct {
 	ElasticsearchClusters map[string]ConfigCluster `yaml:"elasticsearch_clusters"`
 }
 
+// ConfigCluster : containts config of single cluster
 type ConfigCluster struct {
 	URL string `yaml:"url"`
 	Version string `yaml:"version"`
 	Hosts map[string][]string `yaml:"hosts"`
 }
 
+// ClusterHealth : containts cluster health data
 type ClusterHealth struct {
 	Status string `json:"status"`
 }
 
+// ClusterSettings : containts cluster settings data
 type ClusterSettings struct {
 	Transient struct {
 		Cluster struct {
@@ -229,7 +238,7 @@ func getClusterStatus(esURL string) (ClusterHealth, error) {
 		} else {
 			return clusterHealth, msg.err
 		}
-	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
+	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
 		return clusterHealth, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
@@ -251,7 +260,7 @@ func getClusterAllocation(esURL string) (ClusterSettings, error) {
 		} else {
 			return clusterSettings, msg.err
 		}
-	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
+	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
 		return clusterSettings, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
@@ -265,7 +274,7 @@ func setClusterAllocationAll(esURL string) error {
 	select {
 	case err := <-response:
 		return err
-	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
+	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
 		return fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
