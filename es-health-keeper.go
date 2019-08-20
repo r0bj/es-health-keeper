@@ -208,7 +208,7 @@ func getPrometheusMetric(prometheusURL, prometheusBasicAuthUser, prometheusBasic
 			return prometheusResult, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*prometheusQueryTimeout)):
-		return prometheusResult, fmt.Errorf("%s: HTTP timeout", prometheusURL)
+		return prometheusResult, fmt.Errorf("%s: prometheus connection timeout", prometheusURL)
 	}
 
 	return prometheusResult, nil
@@ -230,7 +230,7 @@ func getClusterStatus(esURL string) (ClusterHealth, error) {
 			return clusterHealth, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
-		return clusterHealth, fmt.Errorf("%s: HTTP timeout", esURL)
+		return clusterHealth, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
 	return clusterHealth, nil
@@ -252,7 +252,7 @@ func getClusterAllocation(esURL string) (ClusterSettings, error) {
 			return clusterSettings, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
-		return clusterSettings, fmt.Errorf("%s: HTTP timeout", esURL)
+		return clusterSettings, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
 	return clusterSettings, nil
@@ -266,7 +266,7 @@ func setClusterAllocationAll(esURL string) error {
 	case err := <-response:
 		return err
 	case <-time.After(time.Second * time.Duration(*ESQueryTimeout)):
-		return fmt.Errorf("%s: HTTP PUT timeout", esURL)
+		return fmt.Errorf("%s: elasticsearch connection timeout", esURL)
 	}
 
 	return nil
@@ -520,7 +520,7 @@ func workerSettingsChanger(clusterName string, config Config) {
 								log.Warnf("%s: cannot set cluster allocation to 'all'", clusterName)
 							}
 						} else {
-							log.Debugf("%s: cluster status %s, not changing allocation", clusterName, strings.ToLower(status.Status))
+							log.Debugf("%s: cluster status %s, skipping", clusterName, strings.ToLower(status.Status))
 						}
 					} else {
 						log.Warnf("%s: cannot get cluster status", clusterName)
@@ -616,7 +616,7 @@ func sendSlackMsg(webhookURL, channel, msg, username, color, iconEmoji string, t
 	case err := <-result:
 		return err
 	case <-time.After(time.Second * time.Duration(timeout)):
-		return fmt.Errorf("Slack connection timeout")
+		return fmt.Errorf("%s: slack connection timeout", webhookURL)
 	}
 }
 
@@ -634,7 +634,7 @@ func httpPost(url, data string, result chan<- error) {
 	}
 
 	if resp.StatusCode != 200 {
-		result <- fmt.Errorf("HTTP POST response code: %s", resp.Status)
+		result <- fmt.Errorf("HTTP response code: %s", resp.Status)
 		return
 	}
 
