@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	ver string = "0.11"
+	ver string = "0.12"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
@@ -513,7 +513,7 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 					log.Infof("%s (restarter): starting services... dry run mode, skipping", clusterName)
 				} else {
 					log.Infof("%s (restarter): starting services...", clusterName)
-					
+
 					if err := startServices(clusterName, clusterData, sshUser, sshPort); err == nil {
 						log.Infof("%s (restarter): starting services success", clusterName)
 						sendSlackMsg(
@@ -706,6 +706,9 @@ func main() {
 	}
 
 	log.Infof("Starting, version %s", ver)
+	if *dryRun {
+		log.Info("Running in dry run mode")
+	}
 
 	lock, err := lockfile.New(filepath.Join(os.TempDir(), lockFile))
 	if err != nil {
