@@ -23,13 +23,12 @@ import (
 )
 
 const (
-	ver string = "0.01"
+	ver string = "0.10"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
-	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable": "all"}}`
-	loopInterval int = 20
+	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
+	loopInterval int = 60
 	sshTimeout int = 120
-	delayBetweenRestarts int = 3600
 	lockFile string = "es-health-keeper.lock"
 	slackConnectionTimeout int = 5
 )
@@ -51,6 +50,7 @@ var (
 	slackChannel = kingpin.Flag("slack-channel", "slack channel to send messages").Default("#slack-test-hook").String()
 	slackUsername = kingpin.Flag("slack-username", "slack username field").Default("es-health-keeper").String()
 	slackIconEmoji = kingpin.Flag("slack-icon-emoji", "slack icon-emoji field").Default(":es-health-keeper:").String()
+	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("3600").Int()
 )
 
 // PrometheusResult : containts prometheus result data
@@ -398,8 +398,8 @@ func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster,
 			}
 
 			runningTime := time.Now().Unix() - timestamp.Unix()
-			if runningTime <= int64(delayBetweenRestarts) {
-				log.Infof("%s (restarter): service %s on %s is running for %ds, less then delay between restarts threshold (%ds), skipping", clusterName, commandResult.service, commandResult.host, runningTime, delayBetweenRestarts)
+			if runningTime <= int64(*delayBetweenRestarts) {
+				log.Infof("%s (restarter): service %s on %s is running for %ds, less then delay between restarts threshold (%ds), skipping", clusterName, commandResult.service, commandResult.host, runningTime, *delayBetweenRestarts)
 				return false, nil
 			}
 		}
@@ -411,7 +411,8 @@ func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster,
 func stopServices(clusterName string, clusterData ConfigCluster, sshUser string, sshPort int) error {
 	results := make(chan HostCommandsResult, len(clusterData.Hosts))
 
-	partialCmd := []string{"echo", "sudo", "systemctl", "stop"}
+	// partialCmd := []string{"echo", "sudo", "systemctl", "stop"}
+	partialCmd := []string{"sudo", "systemctl", "stop"}
 
 	for host, services := range clusterData.Hosts {
 		go executeHostCommands(host, sshUser, sshPort, partialCmd, services, results)
@@ -430,7 +431,8 @@ func stopServices(clusterName string, clusterData ConfigCluster, sshUser string,
 func startServices(clusterName string, clusterData ConfigCluster, sshUser string, sshPort int) error {
 	results := make(chan HostCommandsResult, len(clusterData.Hosts))
 
-	partialCmd := []string{"echo", "sudo", "systemctl", "start"}
+	// partialCmd := []string{"echo", "sudo", "systemctl", "start"}
+	partialCmd := []string{"sudo", "systemctl", "start"}
 
 	for host, services := range clusterData.Hosts {
 		go executeHostCommands(host, sshUser, sshPort, partialCmd, services, results)
@@ -447,14 +449,14 @@ func startServices(clusterName string, clusterData ConfigCluster, sshUser string
 }
 
 func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, sshPort int) {
-	log.Infof("Worker restarter %d started", id)
+	log.Infof("Worker (restarter) %d started", id)
 	for clusterName := range jobs {
-		log.Infof("%s (restarter): worker restarter %d started job", clusterName, id)
+		log.Debugf("%s (restarter): worker restarter %d started job", clusterName, id)
 
 		if clusterData, ok := config.ElasticsearchClusters[clusterName]; ok {
-			log.Infof("%s (restarter): starting restart procudure: %s", clusterName, clusterData)
+			log.Infof("%s (restarter): low cluster responsiveness detected", clusterName)
 
-			log.Infof("%s (restarter): checking timestamp for running services", clusterName)
+			log.Debugf("%s (restarter): checking timestamp for running services", clusterName)
 			servicesRunningLongEnough, err := areServicesRunningLongEnough(clusterName, clusterData, sshUser, sshPort)
 			if err != nil {
 				log.Errorf("%s (restarter): checking timestamp for running services failed: %s", clusterName, err)
@@ -462,6 +464,8 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 			}
 
 			if servicesRunningLongEnough {
+				log.Infof("%s (restarter): starting restart procudure: %s", clusterName, clusterData)
+
 				sendSlackMsg(
 					*slackURL,
 					*slackChannel,
@@ -472,12 +476,14 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 					slackConnectionTimeout,
 				)
 
+				log.Infof("%s (restarter): stopping services...", clusterName)
 				if err := stopServices(clusterName, clusterData, sshUser, sshPort); err == nil {
 					log.Infof("%s (restarter): stopping services success", clusterName)
 				} else {
 					log.Errorf("%s (restarter): stopping services failed: %s", clusterName, err)
 				}
 
+				log.Infof("%s (restarter): starting services...", clusterName)
 				if err := startServices(clusterName, clusterData, sshUser, sshPort); err == nil {
 					log.Infof("%s (restarter): starting services success", clusterName)
 					sendSlackMsg(
@@ -509,39 +515,39 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 }
 
 func workerSettingsChanger(clusterName string, config Config) {
-	log.Infof("%s: worker settings changer started", clusterName)
+	log.Infof("%s (reconfigurator): worker started", clusterName)
 	for {
 		if clusterData, ok := config.ElasticsearchClusters[clusterName]; ok {
 			allocation, err := getClusterAllocation(clusterData.URL)
 			if err == nil {
 				if strings.ToLower(allocation.Transient.Cluster.Routing.Allocation.Enable) != "all" {
-					log.Infof("%s: cluster allocation is not 'all'", clusterName)
+					log.Infof("%s (reconfigurator): cluster allocation is not 'all'", clusterName)
 
 					status, err := getClusterStatus(clusterData.URL)
 					if err == nil {
 						if strings.ToLower(status.Status) == "yellow" || strings.ToLower(status.Status) == "green" {
-							log.Infof("%s: changing cluster allocation to 'all'", clusterName)
+							log.Infof("%s (reconfigurator): changing cluster allocation to 'all'", clusterName)
 
 							err := setClusterAllocationAll(clusterData.URL)
 							if err == nil {
-								log.Infof("%s: cluster allocation changed to 'all'", clusterName)
+								log.Infof("%s (reconfigurator): cluster allocation changed to 'all'", clusterName)
 							} else {
-								log.Warnf("%s: cannot set cluster allocation to 'all'", clusterName)
+								log.Warnf("%s (reconfigurator): cannot set cluster allocation to 'all'", clusterName)
 							}
 						} else {
-							log.Debugf("%s: cluster status %s, skipping", clusterName, strings.ToLower(status.Status))
+							log.Infof("%s (reconfigurator): cluster status %s, skipping", clusterName, strings.ToLower(status.Status))
 						}
 					} else {
-						log.Warnf("%s: cannot get cluster status", clusterName)
+						log.Warnf("%s (reconfigurator): cannot get cluster status", clusterName)
 					}
 				} else {
-					log.Debugf("%s: cluster allocation 'all', skipping", clusterName)
+					log.Debugf("%s (reconfigurator): cluster allocation 'all', skipping", clusterName)
 				}
 			} else {
-				log.Warnf("%s: cannot get cluster allocation data", clusterName)
+				log.Warnf("%s (reconfigurator): cannot get cluster allocation data", clusterName)
 			}
 		} else {
-			log.Infof("%s: no data in config", clusterName)
+			log.Infof("%s (reconfigurator): no data in config", clusterName)
 		}
 
 		time.Sleep(time.Second * time.Duration(loopInterval))
