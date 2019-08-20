@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	ver string = "0.10"
+	ver string = "0.11"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
@@ -50,6 +50,7 @@ var (
 	slackUsername = kingpin.Flag("slack-username", "slack username field").Default("es-health-keeper").String()
 	slackIconEmoji = kingpin.Flag("slack-icon-emoji", "slack icon-emoji field").Default(":es-health-keeper:").String()
 	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("5400").Int()
+	dryRun = kingpin.Flag("dry-run", "dry run").Default("false").Bool()
 )
 
 // PrometheusResult : containts prometheus result data
@@ -496,36 +497,46 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 					slackConnectionTimeout,
 				)
 
-				log.Infof("%s (restarter): stopping services...", clusterName)
-				if err := stopServices(clusterName, clusterData, sshUser, sshPort); err == nil {
-					log.Infof("%s (restarter): stopping services success", clusterName)
+				if *dryRun {
+					log.Infof("%s (restarter): stopping services... dry run mode, skipping", clusterName)
 				} else {
-					log.Errorf("%s (restarter): stopping services failed: %s", clusterName, err)
+					log.Infof("%s (restarter): stopping services...", clusterName)
+
+					if err := stopServices(clusterName, clusterData, sshUser, sshPort); err == nil {
+						log.Infof("%s (restarter): stopping services success", clusterName)
+					} else {
+						log.Errorf("%s (restarter): stopping services failed: %s", clusterName, err)
+					}
 				}
 
-				log.Infof("%s (restarter): starting services...", clusterName)
-				if err := startServices(clusterName, clusterData, sshUser, sshPort); err == nil {
-					log.Infof("%s (restarter): starting services success", clusterName)
-					sendSlackMsg(
-						*slackURL,
-						*slackChannel,
-						fmt.Sprintf("Elasticsearch cluster *%s*: restarting cluster finished successfully.", clusterName),
-						*slackUsername,
-						"good",
-						*slackIconEmoji,
-						slackConnectionTimeout,
-					)
+				if *dryRun {
+					log.Infof("%s (restarter): starting services... dry run mode, skipping", clusterName)
 				} else {
-					log.Errorf("%s (restarter): starting services failed: %s", clusterName, err)
-					sendSlackMsg(
-						*slackURL,
-						*slackChannel,
-						fmt.Sprintf("Elasticsearch cluster *%s*: restarting cluster failed. Automatic recovery failed. Manual intervention required.", clusterName),
-						*slackUsername,
-						"danger",
-						*slackIconEmoji,
-						slackConnectionTimeout,
-					)
+					log.Infof("%s (restarter): starting services...", clusterName)
+					
+					if err := startServices(clusterName, clusterData, sshUser, sshPort); err == nil {
+						log.Infof("%s (restarter): starting services success", clusterName)
+						sendSlackMsg(
+							*slackURL,
+							*slackChannel,
+							fmt.Sprintf("Elasticsearch cluster *%s*: restarting cluster finished successfully.", clusterName),
+							*slackUsername,
+							"good",
+							*slackIconEmoji,
+							slackConnectionTimeout,
+						)
+					} else {
+						log.Errorf("%s (restarter): starting services failed: %s", clusterName, err)
+						sendSlackMsg(
+							*slackURL,
+							*slackChannel,
+							fmt.Sprintf("Elasticsearch cluster *%s*: restarting cluster failed. Automatic recovery failed. Manual intervention required.", clusterName),
+							*slackUsername,
+							"danger",
+							*slackIconEmoji,
+							slackConnectionTimeout,
+						)
+					}
 				}
 			}
 		} else {
@@ -546,13 +557,17 @@ func workerSettingsChanger(clusterName string, config Config) {
 					status, err := getClusterStatus(clusterData.URL)
 					if err == nil {
 						if strings.ToLower(status.Status) == "yellow" || strings.ToLower(status.Status) == "green" {
-							log.Infof("%s (reconfigurator): changing cluster allocation to 'all'...", clusterName)
-
-							err := setClusterAllocationAll(clusterData.URL)
-							if err == nil {
-								log.Infof("%s (reconfigurator): cluster allocation changed to 'all'", clusterName)
+							if *dryRun {
+								log.Infof("%s (reconfigurator): changing cluster allocation to 'all'... dry run mode, skipping", clusterName)
 							} else {
-								log.Warnf("%s (reconfigurator): cannot set cluster allocation to 'all'", clusterName)
+								log.Infof("%s (reconfigurator): changing cluster allocation to 'all'...", clusterName)
+
+								err := setClusterAllocationAll(clusterData.URL)
+								if err == nil {
+									log.Infof("%s (reconfigurator): cluster allocation changed to 'all'", clusterName)
+								} else {
+									log.Warnf("%s (reconfigurator): cannot set cluster allocation to 'all'", clusterName)
+								}
 							}
 						} else {
 							log.Infof("%s (reconfigurator): cluster status %s, skipping", clusterName, strings.ToLower(status.Status))
