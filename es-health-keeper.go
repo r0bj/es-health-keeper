@@ -35,7 +35,7 @@ const (
 
 var (
 	prometheusURL = kingpin.Flag("url", "prometheus URL").Default("http://127.0.0.1:9090").Short('u').String()
-	prometheusQuery = kingpin.Flag("query", "prometheus query").Default("avg_over_time(up{job=\"elasticsearch\"}[20m])").String()
+	prometheusQuery = kingpin.Flag("query", "prometheus query").Default("avg_over_time(up{job=\"elasticsearch\"}[30m])").String()
 	prometheusQueryResultThreshold = kingpin.Flag("query-result-threshold", "prometheus query result threshold").Default("0.05").Float()
 	prometheusQueryTimeout = kingpin.Flag("prometheus-query-timeout", "prometheus query timeout").Default("10").Int()
 	eSQueryTimeout = kingpin.Flag("es-query-timeout", "prometheus query timeout").Default("60").Int()
@@ -49,7 +49,7 @@ var (
 	slackChannel = kingpin.Flag("slack-channel", "slack channel to send messages").Default("#it-prometheus-alerts").String()
 	slackUsername = kingpin.Flag("slack-username", "slack username field").Default("es-health-keeper").String()
 	slackIconEmoji = kingpin.Flag("slack-icon-emoji", "slack icon-emoji field").Default(":es-health-keeper:").String()
-	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("3600").Int()
+	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("5400").Int()
 )
 
 // PrometheusResult : containts prometheus result data
