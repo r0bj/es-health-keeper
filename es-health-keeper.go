@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ver string = "0.14"
+	ver string = "0.15"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
