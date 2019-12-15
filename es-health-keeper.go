@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ver string = "0.16"
+	ver string = "0.18"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
@@ -30,6 +30,7 @@ const (
 	sshTimeout int = 120
 	lockFilePath string = "/run/es-health-keeper/es-health-keeper.lock"
 	slackConnectionTimeout int = 5
+	defaultAlertmanagerSilenceComment string = "es-health-keeper"
 )
 
 var (
@@ -51,6 +52,9 @@ var (
 	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("5400").Int()
 	redIndexTimeout = kingpin.Flag("red-index-timeout", "timeout for index in red status after cluster restart").Default("3600").Int()
 	dryRun = kingpin.Flag("dry-run", "dry run").Default("false").Bool()
+	amtoolPath = kingpin.Flag("amtool", "path to amtool binary").Default("/usr/bin/amtool").String()
+	alertmanagerURL = kingpin.Flag("alertmanager-url", "alertmanager URL").Default("").String()
+	alertmanagerSilenceDuration = kingpin.Flag("alertmanager-silence-duration", "alertmanager silence duration").Default("4h").String()
 )
 
 // PrometheusResult : containts prometheus result data
@@ -538,6 +542,7 @@ func startServices(clusterName string, clusterData ConfigCluster, sshUser string
 
 func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, sshPort, delayBetweenRestarts int) {
 	log.Infof("Worker (restarter) %d started", id)
+
 	for clusterName := range jobs {
 		log.Debugf("%s (restarter): worker restarter %d started job", clusterName, id)
 
@@ -568,6 +573,10 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 						*slackIconEmoji,
 						slackConnectionTimeout,
 					)
+
+					if err := silenceAlertmanagerAlert(clusterName, *amtoolPath, *alertmanagerURL, *alertmanagerSilenceDuration); err != nil {
+						log.Errorf("%s (restarter): adding alertmanager silence failed: %s", clusterName, err)
+					}
 
 					if err := stopServices(clusterName, clusterData, sshUser, sshPort); err == nil {
 						log.Infof("%s (restarter): stopping services success", clusterName)
@@ -616,6 +625,7 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 
 func workerSettingsChanger(clusterName string, config Config) {
 	log.Infof("%s (reconfigurator): worker started", clusterName)
+
 	for {
 		if clusterData, ok := config.ElasticsearchClusters[clusterName]; ok {
 			allocation, err := getClusterAllocation(clusterData.URL)
@@ -676,6 +686,7 @@ func isIndexCreatedToday(index string) bool {
 
 func workerIndexHealer(clusterName string, config Config, sshUser string, sshPort, redIndexTimeout int) {
 	log.Infof("%s (index-healer): worker started", clusterName)
+
 	for {
 		if clusterData, ok := config.ElasticsearchClusters[clusterName]; ok {
 			indicesStatus, err := getIndicesStatus(clusterData.URL)
@@ -838,6 +849,33 @@ func httpPost(url, data string, result chan<- error) {
 	}
 
 	result <- nil
+}
+
+
+func silenceAlertmanagerAlert(instance, amtoolPath, alertmanagerURL, alertmanagerSilenceDuration string) error {
+	if alertmanagerURL != "" {
+		log.Infof("%s (restarter): setting alertmanager silence for instance", instance)
+
+		instanceShort := strings.Split(instance, ".")[0]
+
+		var command Command
+		command.cmd = amtoolPath
+		command.args = []string{
+			"--alertmanager.url=" + alertmanagerURL,
+			"silence",
+			"add",
+			"-c",
+			defaultAlertmanagerSilenceComment,
+			"-d",
+			alertmanagerSilenceDuration,
+			"instance=" + instanceShort,
+		}
+		_, err := executeCommand(command)
+
+		return err
+	}
+
+	return nil
 }
 
 func main() {
