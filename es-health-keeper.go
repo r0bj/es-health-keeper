@@ -8,7 +8,6 @@ import (
 	"os"
 	"strconv"
 	"bytes"
-	"path/filepath"
 	"os/signal"
 	"syscall"
 	"io/ioutil"
@@ -16,20 +15,20 @@ import (
 	"encoding/json"
 
 	"gopkg.in/alecthomas/kingpin.v2"
-	log "github.com/Sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 	"github.com/nightlyone/lockfile"
 	"github.com/parnurzeal/gorequest"
 	"gopkg.in/yaml.v2"
 )
 
 const (
-	ver string = "0.12"
+	ver string = "0.14"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
 	loopInterval int = 60
 	sshTimeout int = 120
-	lockFile string = "es-health-keeper.lock"
+	lockFilePath string = "/run/es-health-keeper/es-health-keeper.lock"
 	slackConnectionTimeout int = 5
 )
 
@@ -50,6 +49,7 @@ var (
 	slackUsername = kingpin.Flag("slack-username", "slack username field").Default("es-health-keeper").String()
 	slackIconEmoji = kingpin.Flag("slack-icon-emoji", "slack icon-emoji field").Default(":es-health-keeper:").String()
 	delayBetweenRestarts = kingpin.Flag("delay-between-restarts", "delay between cluster restarts").Default("5400").Int()
+	redIndexTimeout = kingpin.Flag("red-index-timeout", "timeout for index in red status after cluster restart").Default("3600").Int()
 	dryRun = kingpin.Flag("dry-run", "dry run").Default("false").Bool()
 )
 
@@ -129,6 +129,13 @@ type ClusterSettings struct {
 	} `json:"transient"`
 }
 
+// IndexStatus : containts indices status data
+type IndexStatus struct {
+	Health string `json:"health"`
+	Status string `json:"status"`
+	Index string `json:"index"`
+}
+
 // Command : containts exec command data
 type Command struct {
 	cmd string
@@ -201,6 +208,28 @@ func httpPut(url, data string, response chan<- error) {
 	response <- nil
 }
 
+func httpDelete(url string, response chan<- error) {
+	request := gorequest.New()
+	request.Header.Set("Content-Type", "application/json")
+	resp, _, errs := request.Delete(url).End()
+
+	if errs != nil {
+		var errsStr []string
+		for _, e := range errs {
+			errsStr = append(errsStr, fmt.Sprintf("%s", e))
+		}
+		response <- fmt.Errorf("%s", strings.Join(errsStr, ", "))
+		return
+	}
+
+	if resp.StatusCode != 200 {
+		response <- fmt.Errorf("HTTP response code: %s", resp.Status)
+		return
+	}
+
+	response <- nil
+}
+
 func getPrometheusMetric(prometheusURL, prometheusBasicAuthUser, prometheusBasicAuthPassword, prometheusQuery string) (PrometheusResult, error) {
 	response := make(chan HTTPResponse)
 	go httpGet(prometheusURL + "/api/v1/query?query=" + prometheusQuery, prometheusBasicAuthUser, prometheusBasicAuthPassword, response)
@@ -217,7 +246,7 @@ func getPrometheusMetric(prometheusURL, prometheusBasicAuthUser, prometheusBasic
 			return prometheusResult, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*prometheusQueryTimeout)):
-		return prometheusResult, fmt.Errorf("%s: prometheus connection timeout", prometheusURL)
+		return prometheusResult, fmt.Errorf("%s: prometheus client timeout", prometheusURL)
 	}
 
 	return prometheusResult, nil
@@ -239,7 +268,7 @@ func getClusterStatus(esURL string) (ClusterHealth, error) {
 			return clusterHealth, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
-		return clusterHealth, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
+		return clusterHealth, fmt.Errorf("%s: get cluster status elasticsearch client timeout", esURL)
 	}
 
 	return clusterHealth, nil
@@ -261,10 +290,32 @@ func getClusterAllocation(esURL string) (ClusterSettings, error) {
 			return clusterSettings, msg.err
 		}
 	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
-		return clusterSettings, fmt.Errorf("%s: elasticsearch connection timeout", esURL)
+		return clusterSettings, fmt.Errorf("%s: get cluster allocation elasticsearch connection timeout", esURL)
 	}
 
 	return clusterSettings, nil
+}
+
+func getIndicesStatus(esURL string) ([]IndexStatus, error) {
+	response := make(chan HTTPResponse)
+	go httpGet(esURL + "/_cat/indices?format=json", "", "", response)
+
+	var indicesStatus []IndexStatus
+	select {
+	case msg := <-response:
+		if msg.err == nil {
+			err := json.Unmarshal([]byte(msg.body), &indicesStatus)
+			if err != nil {
+				return indicesStatus, err
+			}
+		} else {
+			return indicesStatus, msg.err
+		}
+	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
+		return indicesStatus, fmt.Errorf("%s: get indices status elasticsearch connection timeout", esURL)
+	}
+
+	return indicesStatus, nil
 }
 
 func setClusterAllocationAll(esURL string) error {
@@ -275,7 +326,21 @@ func setClusterAllocationAll(esURL string) error {
 	case err := <-response:
 		return err
 	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
-		return fmt.Errorf("%s: elasticsearch connection timeout", esURL)
+		return fmt.Errorf("%s: set cluster allocation elasticsearch connection timeout", esURL)
+	}
+
+	return nil
+}
+
+func deleteIndex(esURL, index string) error {
+	response := make(chan error)
+	go httpDelete(esURL + "/" + index, response)
+
+	select {
+	case err := <-response:
+		return err
+	case <-time.After(time.Second * time.Duration(*eSQueryTimeout)):
+		return fmt.Errorf("%s: delete index elasticsearch connection timeout", esURL)
 	}
 
 	return nil
@@ -365,7 +430,7 @@ func executeRemoteCommand(host, sshUser string, sshPort int, service string, cmd
 	results <- commandResult
 }
 
-func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster, sshUser string, sshPort int) (bool, error) {
+func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster, sshUser string, sshPort, runningThreshold int) (bool, error) {
 	if err := doServiceExists(clusterName, clusterData, sshUser, sshPort); err != nil {
 		return false, err
 	}
@@ -402,8 +467,8 @@ func areServicesRunningLongEnough(clusterName string, clusterData ConfigCluster,
 			}
 
 			runningTime := time.Now().Unix() - timestamp.Unix()
-			if runningTime <= int64(*delayBetweenRestarts) {
-				log.Infof("%s (restarter): service %s on %s is running for %ds, less then delay between restarts threshold (%ds), skipping", clusterName, commandResult.service, commandResult.host, runningTime, *delayBetweenRestarts)
+			if runningTime <= int64(runningThreshold) {
+				log.Infof("%s: service %s on %s is running for %ds, less then given threshold (%ds), skipping", clusterName, commandResult.service, commandResult.host, runningTime, runningThreshold)
 				return false, nil
 			}
 		}
@@ -469,7 +534,7 @@ func startServices(clusterName string, clusterData ConfigCluster, sshUser string
 	return nil
 }
 
-func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, sshPort int) {
+func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, sshPort, delayBetweenRestarts int) {
 	log.Infof("Worker (restarter) %d started", id)
 	for clusterName := range jobs {
 		log.Debugf("%s (restarter): worker restarter %d started job", clusterName, id)
@@ -478,7 +543,7 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 			log.Infof("%s (restarter): low cluster responsiveness detected", clusterName)
 
 			log.Debugf("%s (restarter): checking timestamp for running services", clusterName)
-			servicesRunningLongEnough, err := areServicesRunningLongEnough(clusterName, clusterData, sshUser, sshPort)
+			servicesRunningLongEnough, err := areServicesRunningLongEnough(clusterName, clusterData, sshUser, sshPort, delayBetweenRestarts)
 			if err != nil {
 				log.Errorf("%s (restarter): checking timestamp for running services failed: %s", clusterName, err)
 				continue
@@ -487,20 +552,20 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 			if servicesRunningLongEnough {
 				log.Infof("%s (restarter): starting restart procudure: %s", clusterName, clusterData)
 
-				sendSlackMsg(
-					*slackURL,
-					*slackChannel,
-					fmt.Sprintf("Elasticsearch cluster *%s*: low responsiveness detected, restarting cluster.", clusterName),
-					*slackUsername,
-					"warning",
-					*slackIconEmoji,
-					slackConnectionTimeout,
-				)
-
 				if *dryRun {
 					log.Infof("%s (restarter): stopping services... dry run mode, skipping", clusterName)
 				} else {
 					log.Infof("%s (restarter): stopping services...", clusterName)
+
+					sendSlackMsg(
+						*slackURL,
+						*slackChannel,
+						fmt.Sprintf("Elasticsearch cluster *%s*: low responsiveness detected, restarting cluster.", clusterName),
+						*slackUsername,
+						"warning",
+						*slackIconEmoji,
+						slackConnectionTimeout,
+					)
 
 					if err := stopServices(clusterName, clusterData, sshUser, sshPort); err == nil {
 						log.Infof("%s (restarter): stopping services success", clusterName)
@@ -538,6 +603,8 @@ func workerRestarter(id int, jobs <-chan string, config Config, sshUser string, 
 						)
 					}
 				}
+			} else {
+				log.Infof("%s (restarter): services are not running long enough (%ds threshold), skipping", clusterName, delayBetweenRestarts)
 			}
 		} else {
 			log.Infof("%s (restarter): no data in config, skipping", clusterName)
@@ -583,6 +650,86 @@ func workerSettingsChanger(clusterName string, config Config) {
 			}
 		} else {
 			log.Infof("%s (reconfigurator): no data in config, skipping", clusterName)
+		}
+
+		time.Sleep(time.Second * time.Duration(loopInterval))
+    }
+}
+
+func joinMapKeys(m map[string]bool, delimiter string) string {
+	keys := []string{}
+	for k := range m {
+		keys = append(keys, k)
+	}
+
+	return strings.Join(keys, delimiter)
+}
+
+func isIndexCreatedToday(index string) bool {
+	currentTime := time.Now()
+	r := regexp.MustCompile("^[_a-zA-Z0-9-]+_" + fmt.Sprint(currentTime.Format("2006-01-02")) + "$")
+
+	return r.MatchString(index)
+}
+
+func workerIndexHealer(clusterName string, config Config, sshUser string, sshPort, redIndexTimeout int) {
+	log.Infof("%s (index-healer): worker started", clusterName)
+	for {
+		if clusterData, ok := config.ElasticsearchClusters[clusterName]; ok {
+			indicesStatus, err := getIndicesStatus(clusterData.URL)
+			if err == nil {
+				faultyIndices := map[string]bool{}
+				for _, indexData := range indicesStatus {
+					if indexData.Health == "red" {
+						if isIndexCreatedToday(indexData.Index) {
+							faultyIndices[indexData.Index] = true
+						}
+					}
+				}
+
+				if len(faultyIndices) > 0 {
+					log.Debugf("%s (index-healer): checking timestamp for running services", clusterName)
+					servicesRunningLongEnough, err := areServicesRunningLongEnough(clusterName, clusterData, sshUser, sshPort, redIndexTimeout)
+					if err != nil {
+						log.Errorf("%s (index-healer): checking timestamp for running services failed: %s", clusterName, err)
+						continue
+					}
+
+					if servicesRunningLongEnough {
+						if ! *dryRun {
+							sendSlackMsg(
+								*slackURL,
+								*slackChannel,
+								fmt.Sprintf("Elasticsearch cluster *%s*: deleting faulty (red) indices %s.", clusterName, joinMapKeys(faultyIndices, ",")),
+								*slackUsername,
+								"warning",
+								*slackIconEmoji,
+								slackConnectionTimeout,
+							)
+						}
+
+						for index := range faultyIndices {
+							if *dryRun {
+								log.Infof("%s (index-healer): deleting faulty index %s, dry run mode, skipping", clusterName, index)
+							} else {
+								log.Infof("%s (index-healer): deleting faulty index %s", clusterName, index)
+
+								if err := deleteIndex(clusterData.URL, index); err == nil {
+									log.Infof("%s (index-healer): deleting faulty index %s success", clusterName, index)
+								} else {
+									log.Errorf("%s (index-healer): deleting faulty index %s failed: %s", clusterName, index, err)
+								}
+							}
+						}
+					} else {
+						log.Infof("%s (index-healer): services are not running long enough (%ds threshold), skipping", clusterName, redIndexTimeout)
+					}
+				}
+			} else {
+				log.Warnf("%s (index-healer): cannot get indices status data", clusterName)
+			}
+		} else {
+			log.Infof("%s (index-healer): no data in config, skipping", clusterName)
 		}
 
 		time.Sleep(time.Second * time.Duration(loopInterval))
@@ -710,7 +857,7 @@ func main() {
 		log.Info("Running in dry run mode")
 	}
 
-	lock, err := lockfile.New(filepath.Join(os.TempDir(), lockFile))
+	lock, err := lockfile.New(lockFilePath)
 	if err != nil {
 		log.Fatalf("Cannot initialize lock. reason: %v", err)
 	}
@@ -743,13 +890,18 @@ func main() {
     jobs := make(chan string, len(config.ElasticsearchClusters))
 
     for w := 1; w <= len(config.ElasticsearchClusters); w++ {
-        go workerRestarter(w, jobs, config, *sshUser, *sshPort)
+        go workerRestarter(w, jobs, config, *sshUser, *sshPort, *delayBetweenRestarts)
     }
+
+    go metricsMonitor(jobs, *prometheusURL, *prometheusBasicAuthUser, *prometheusBasicAuthPassword, *prometheusQuery, *prometheusQueryResultThreshold)
 
     for clusterName := range config.ElasticsearchClusters {
         go workerSettingsChanger(clusterName, config)
     }
 
-    go metricsMonitor(jobs, *prometheusURL, *prometheusBasicAuthUser, *prometheusBasicAuthPassword, *prometheusQuery, *prometheusQueryResultThreshold)
+    for clusterName := range config.ElasticsearchClusters {
+        go workerIndexHealer(clusterName, config, *sshUser, *sshPort, *redIndexTimeout)
+    }
+
     select {}
 }
