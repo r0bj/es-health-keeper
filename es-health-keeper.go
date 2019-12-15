@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	ver string = "0.15"
+	ver string = "0.16"
 	logDateLayout string = "2006-01-02 15:04:05"
 	systemdDateLayout string  = "Mon 2006-01-02 15:04:05 MST"
 	allocationAllJSON string = `{"transient":{"cluster.routing.allocation.enable":"all"}}`
@@ -231,6 +231,8 @@ func httpDelete(url string, response chan<- error) {
 }
 
 func getPrometheusMetric(prometheusURL, prometheusBasicAuthUser, prometheusBasicAuthPassword, prometheusQuery string) (PrometheusResult, error) {
+	log.Debugf("Getting prometheus metrics from %s", prometheusURL)
+
 	response := make(chan HTTPResponse)
 	go httpGet(prometheusURL + "/api/v1/query?query=" + prometheusQuery, prometheusBasicAuthUser, prometheusBasicAuthPassword, response)
 
@@ -240,7 +242,7 @@ func getPrometheusMetric(prometheusURL, prometheusBasicAuthUser, prometheusBasic
 		if msg.err == nil {
 			err := json.Unmarshal([]byte(msg.body), &prometheusResult)
 			if err != nil {
-				return prometheusResult, err
+				return prometheusResult, fmt.Errorf("unmarshall error: %v", err)
 			}
 		} else {
 			return prometheusResult, msg.err
